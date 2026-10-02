@@ -1,0 +1,56 @@
+# DiceMC Money and Sign Shops
+# Copyright (c) 2023 Caltinor
+# Licensed under the MIT License. The copyright notice and permission notice
+# are kept in LICENSE.txt at the root of this project.
+
+license="${mod_license}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+authors="Caltinor"
+credits="NeoForge 26.1.2 port by PrincessStellar."
+description='''
+A client-optional money mod with sign shops.
+Copyright (c) 2023 Caltinor. MIT License.
+NeoForge 26.1.2 port by PrincessStellar.
+'''
+
+[[mixins]]
+config="${mod_id}.mixins.json"
+
+[[dependencies.${mod_id}]]
+    modId="neoforge"
+    type="required"
+    versionRange="[${neo_version},)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="minecraft"
+    type="required"
+    versionRange="${minecraft_version_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="ftbquests"
+    type="optional"
+    versionRange="[26.1.2.8,)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="ftbchunks"
+    type="optional"
+    versionRange="[26.1.2,)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="kubejs"
+    type="optional"
+    versionRange="${kubejs_version_range}"
+    ordering="AFTER"
+    side="BOTH"

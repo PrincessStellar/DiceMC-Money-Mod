@@ -2,11 +2,11 @@ package dicemc.money.api;
 
 import java.util.UUID;
 
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 
 public interface IMoneyManager {
-	double getBalance(ResourceLocation type, UUID id);
-	boolean setBalance(ResourceLocation type, UUID id, double value);
-	boolean changeBalance(ResourceLocation type, UUID id, double value);
-	boolean transferFunds(ResourceLocation fromType, UUID fromID, ResourceLocation toType, UUID toID, double value);
+	double getBalance(Identifier type, UUID id);
+	boolean setBalance(Identifier type, UUID id, double value);
+	boolean changeBalance(Identifier type, UUID id, double value);
+	boolean transferFunds(Identifier fromType, UUID fromID, Identifier toType, UUID toID, double value);
 }

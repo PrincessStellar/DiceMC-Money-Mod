@@ -8,7 +8,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.UUID;
 
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 
 public class DatabaseManager {
@@ -46,7 +46,8 @@ public class DatabaseManager {
 		
 	}
 	
-	public void postEntry(long DTG, UUID fromID, ResourceLocation fromType, String fromName, UUID toID, ResourceLocation toType, String toName, double price, String item) {
+	public void postEntry(long DTG, UUID fromID, Identifier fromType, String fromName, UUID toID, Identifier toType, String toName, double price, String item) {
+		if (con == null || fromID == null || fromType == null || toID == null || toType == null) return;
 		String sql = "INSERT INTO History (DTG, FROM_ID, FROM_TYPE, FROM_NAME, TO_ID, TO_TYPE, TO_NAME, PRICE, ITEM) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 		PreparedStatement st = null;
 		try {
@@ -61,7 +62,7 @@ public class DatabaseManager {
 			st.setDouble(8, price);
 			st.setString(9, item);
 		} catch (SQLException e) {e.printStackTrace();}
-		executeUPDATE(st);
+		if (st != null) executeUPDATE(st);
 	}
 	
 	public ResultSet executeSELECT(PreparedStatement sql) {
@@ -71,6 +72,7 @@ public class DatabaseManager {
 	}
 	
 	public int executeUPDATE(PreparedStatement sql) {
+		if (sql == null) return 0;
 		try {return sql.executeUpdate();
 		} catch (SQLException e) {e.printStackTrace();}
 		return 0;

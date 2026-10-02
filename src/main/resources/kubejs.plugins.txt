@@ -1,0 +1,1 @@
+dicemc.money.compat.kubejs.DiceMoneyKubePlugin

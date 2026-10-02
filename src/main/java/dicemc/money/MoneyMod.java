@@ -8,7 +8,9 @@ import dicemc.money.commands.ShopCommandBuilder;
 import dicemc.money.compat.ftbquests.FTBQHandler;
 import dicemc.money.setup.Config;
 import dicemc.money.storage.DatabaseManager;
-import net.minecraft.resources.ResourceLocation;
+import java.nio.file.Path;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.level.storage.LevelResource;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.ModContainer;
@@ -28,9 +30,9 @@ public class MoneyMod {
 	
 	public MoneyMod(IEventBus bus, ModContainer container) {
 		container.registerConfig(ModConfig.Type.SERVER, Config.SERVER_CONFIG);
-		
-		if (ModList.get().isLoaded( "ftbquests" ))
-        	FTBQHandler.init();
+		if (ModList.get().isLoaded("ftbquests")) {
+			FTBQHandler.init();
+		}
 
 		NeoForge.EVENT_BUS.register(this);
 	}
@@ -39,8 +41,10 @@ public class MoneyMod {
 	public void onServerStart(ServerStartingEvent event ) {
 		if (Config.ENABLE_HISTORY.get()) {
 			String worldname = getWorldName(event.getServer().getWorldData().getLevelName());
-			String urlIn = event.getServer().getServerDirectory().toAbsolutePath() + "\\saves\\" + worldname +"\\";
+			Path root = event.getServer().getWorldPath(LevelResource.ROOT);
+			String urlIn = root.toAbsolutePath() + java.io.File.separator;
 			dbm = new DatabaseManager(worldname, urlIn);
+			dbm.setServer(event.getServer());
 		}
 	}
 	
@@ -54,12 +58,12 @@ public class MoneyMod {
 	//This enum is just for the establishment of later types.
 	//Just forward thinking for expansion.
 	public enum AcctTypes{
-		PLAYER(ResourceLocation.fromNamespaceAndPath(MOD_ID, "player")),
-		SERVER(ResourceLocation.fromNamespaceAndPath(MOD_ID, "server"));
+		PLAYER(Identifier.fromNamespaceAndPath(MOD_ID, "player")),
+		SERVER(Identifier.fromNamespaceAndPath(MOD_ID, "server"));
 		
-		public ResourceLocation key;
+		public Identifier key;
 		
-		AcctTypes(ResourceLocation res) {key = res;}
+		AcctTypes(Identifier res) {key = res;}
 	}
 	
 	private static String getWorldName(String raw) {

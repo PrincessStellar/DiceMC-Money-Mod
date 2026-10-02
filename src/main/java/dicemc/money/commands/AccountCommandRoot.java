@@ -6,11 +6,10 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import dicemc.money.MoneyMod.AcctTypes;
 import dicemc.money.setup.Config;
+import dicemc.money.setup.ServerText;
 import dicemc.money.storage.MoneyWSD;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
-import net.minecraft.network.chat.Component;
-import net.minecraft.server.level.ServerLevel;
 
 public class AccountCommandRoot implements Command<CommandSourceStack>{
 	private static final AccountCommandRoot CMD = new AccountCommandRoot();
@@ -25,7 +24,7 @@ public class AccountCommandRoot implements Command<CommandSourceStack>{
 	@Override
 	public int run(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
 		Double balP = MoneyWSD.get().getBalance(AcctTypes.PLAYER.key, context.getSource().getEntityOrException().getUUID());
-		context.getSource().sendSuccess(() -> Component.literal(Config.getFormattedCurrency(balP)), false);
+		context.getSource().sendSuccess(() -> ServerText.to(context.getSource(), "message.command.balance", Config.getFormattedCurrency(balP)), false);
 		return 0;
 	}
 	

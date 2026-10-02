@@ -4,131 +4,128 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
+
 import dicemc.money.MoneyMod;
 import dicemc.money.MoneyMod.AcctTypes;
 import dicemc.money.api.IMoneyManager;
 import dicemc.money.setup.Config;
-import net.minecraft.core.HolderLookup;
-import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.ListTag;
-import net.minecraft.nbt.Tag;
-import net.minecraft.resources.ResourceLocation;
-import net.minecraft.server.level.ServerLevel;
+import dicemc.money.setup.Profiles;
+import net.minecraft.core.UUIDUtil;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.saveddata.SavedData;
+import net.minecraft.world.level.saveddata.SavedDataType;
 import net.neoforged.neoforge.server.ServerLifecycleHooks;
 
 public class MoneyWSD extends SavedData implements IMoneyManager {
-	private static final String DATA_NAME = MoneyMod.MOD_ID + "_data";
+	public static final Codec<MoneyWSD> CODEC = RecordCodecBuilder.create(instance -> instance.group(
+			Codec.unboundedMap(Identifier.CODEC, Codec.unboundedMap(UUIDUtil.STRING_CODEC, Codec.DOUBLE))
+					.optionalFieldOf("accounts", Map.of())
+					.forGetter(sd -> sd.accounts)
+	).apply(instance, MoneyWSD::new));
+
+	public static final SavedDataType<MoneyWSD> TYPE = new SavedDataType<>(
+			Identifier.fromNamespaceAndPath(MoneyMod.MOD_ID, "data"),
+			MoneyWSD::new,
+			CODEC);
+
+	private final Map<Identifier, Map<UUID, Double>> accounts = new HashMap<>();
 
 	public MoneyWSD() {}
-	
-	private Map<ResourceLocation, Map<UUID, Double>> accounts = new HashMap<>();
-	
-	public Map<UUID, Double> getAccountMap(ResourceLocation res) {return accounts.getOrDefault(res, new HashMap<>());}
-	
-	@Override
-	public double getBalance(ResourceLocation type, UUID owner) {
-		accountChecker(type, owner);
-		return accounts.getOrDefault(type, new HashMap<>()).get(owner);
+
+	public MoneyWSD(Map<Identifier, Map<UUID, Double>> loaded) {
+		loaded.forEach((type, balances) -> accounts.put(type, new HashMap<>(balances)));
 	}
-	
-	@Override
-	public boolean setBalance(ResourceLocation type, UUID id, double value) {
-		if (type != null && accounts.containsKey(type)) {
-			if (id != null) {				
-				accounts.get(type).put(id, value);
-				this.setDirty();
-				if (Config.ENABLE_HISTORY.get()) {
-					
-				}
-				return true;
-			}
-		}
-		return false;
+
+	public Map<UUID, Double> getAccountMap(Identifier res) {
+		return accounts.getOrDefault(res, new HashMap<>());
 	}
 
 	@Override
-	public boolean changeBalance(ResourceLocation type, UUID id, double value) {
-		if (type == null || id == null) return false;
+	public double getBalance(Identifier type, UUID owner) {
+		if (type == null || owner == null) return 0;
+		accountChecker(type, owner);
+		Map<UUID, Double> map = accounts.get(type);
+		if (map == null) return 0;
+		Double value = map.get(owner);
+		if (value == null || !Double.isFinite(value)) return 0;
+		return value;
+	}
+
+	@Override
+	public boolean setBalance(Identifier type, UUID id, double value) {
+		if (type == null || id == null || !Double.isFinite(value)) return false;
+		accountChecker(type, id);
+		Map<UUID, Double> map = accounts.get(type);
+		if (map == null) return false;
+		map.put(id, value);
+		this.setDirty();
+		return true;
+	}
+
+	@Override
+	public boolean changeBalance(Identifier type, UUID id, double value) {
+		if (type == null || id == null || !Double.isFinite(value)) return false;
 		double current = getBalance(type, id);
 		double future = current + value;
+		if (!Double.isFinite(future)) return false;
 		return setBalance(type, id, future);
 	}
-	
+
 	@Override
-	public boolean transferFunds(ResourceLocation fromType, UUID fromID, ResourceLocation toType, UUID toID, double value) {
-		if (fromType == null || fromID == null || toType == null || toID == null) return false;
+	public boolean transferFunds(Identifier fromType, UUID fromID, Identifier toType, UUID toID, double value) {
+		if (fromType == null || fromID == null || toType == null || toID == null || !Double.isFinite(value)) return false;
 		double funds = Math.abs(value);
+		if (!Double.isFinite(funds)) return false;
 		double fromBal = getBalance(fromType, fromID);
 		if (fromBal < funds) return false;
-		if (changeBalance(fromType, fromID, -funds) && changeBalance(toType, toID, funds)) { 
-			this.setDirty();
-			return true;
-		}
-		else 
-			return false;
+		if (funds == 0 || (fromType.equals(toType) && fromID.equals(toID))) return true;
+		double toBal = getBalance(toType, toID);
+		double nextFrom = fromBal - funds;
+		double nextTo = toBal + funds;
+		if (!Double.isFinite(nextFrom) || !Double.isFinite(nextTo)) return false;
+		Map<UUID, Double> fromMap = accounts.get(fromType);
+		Map<UUID, Double> toMap = accounts.get(toType);
+		if (fromMap == null || toMap == null) return false;
+		fromMap.put(fromID, nextFrom);
+		toMap.put(toID, nextTo);
+		this.setDirty();
+		return true;
 	}
-	
-	public void accountChecker(ResourceLocation type, UUID owner) {
-		if (type != null && !accounts.containsKey(type)) {
+
+	/** Removes a finite amount the account can pay. Zero moves nothing and succeeds. A short balance is left as it was. */
+	public boolean tryTake(Identifier type, UUID id, double amount) {
+		if (type == null || id == null || !Double.isFinite(amount) || amount < 0) return false;
+		if (amount == 0) return true;
+		double balance = getBalance(type, id);
+		if (balance < amount) return false;
+		return changeBalance(type, id, -amount);
+	}
+
+	public void accountChecker(Identifier type, UUID owner) {
+		if (type == null) return;
+		if (!accounts.containsKey(type)) {
 			accounts.put(type, new HashMap<>());
 			this.setDirty();
 		}
-		if (owner != null && !accounts.get(type).containsKey(owner)) {
-			accounts.get(type).put(owner, Config.STARTING_FUNDS.get());
-			if (Config.ENABLE_HISTORY.get()) 
-				MoneyMod.dbm.postEntry(System.currentTimeMillis(), DatabaseManager.NIL, AcctTypes.SERVER.key, "Server"
-						, owner, type, MoneyMod.dbm.server.getProfileCache().get(owner).get().getName()
-						, Config.STARTING_FUNDS.get(), "Starting Funds Deposit");
-			this.setDirty();
+		Map<UUID, Double> map = accounts.get(type);
+		if (owner == null || map == null || map.containsKey(owner)) return;
+		double start = Config.STARTING_FUNDS.get();
+		if (!Double.isFinite(start) || start < 0) start = 0;
+		map.put(owner, start);
+		if (Config.ENABLE_HISTORY.get() && MoneyMod.dbm != null && MoneyMod.dbm.server != null) {
+			MoneyMod.dbm.postEntry(System.currentTimeMillis(), DatabaseManager.NIL, AcctTypes.SERVER.key, "Server",
+					owner, type, Profiles.name(MoneyMod.dbm.server, owner),
+					start, "Starting Funds Deposit");
 		}
+		this.setDirty();
 	}
 
-	public MoneyWSD(CompoundTag nbt, HolderLookup.Provider provider) {
-		ListTag baseList = nbt.getList("types", Tag.TAG_COMPOUND);
-		for (int b = 0; b < baseList.size(); b++) {
-			CompoundTag entry = baseList.getCompound(b);
-			ResourceLocation res = ResourceLocation.parse(entry.getString("type"));
-			Map<UUID, Double> data = new HashMap<>();
-			ListTag list = entry.getList("data", Tag.TAG_COMPOUND);
-			for (int i = 0; i < list.size(); i++) {
-				CompoundTag snbt = list.getCompound(i);
-				UUID id = snbt.getUUID("id");
-				double balance = snbt.getDouble("balance");
-				data.put(id, balance);
-			}
-			accounts.put(res, data);
-		}
-	}
-
-	@Override
-	public CompoundTag save(CompoundTag nbt, HolderLookup.Provider provider) {
-		ListTag baseList = new ListTag();
-		for (Map.Entry<ResourceLocation, Map<UUID, Double>> base : accounts.entrySet()) {
-			CompoundTag entry = new CompoundTag();
-			ListTag list = new ListTag();
-			entry.putString("type", base.getKey().toString());
-			for (Map.Entry<UUID, Double> data : base.getValue().entrySet()) {
-				CompoundTag dataNBT = new CompoundTag();
-				dataNBT.putUUID("id", data.getKey());
-				dataNBT.putDouble("balance", data.getValue());
-				list.add(dataNBT);
-			}
-			entry.put("data", list);
-			baseList.add(entry);
-		}
-		nbt.put("types", baseList);
-		return nbt;
-	}
-
-	public static Factory<MoneyWSD> dataFactory() {
-		return new SavedData.Factory<MoneyWSD>(MoneyWSD::new, MoneyWSD::new, null);
-	}
-	
 	public static MoneyWSD get() {
-		if (ServerLifecycleHooks.getCurrentServer() != null)
-			return ServerLifecycleHooks.getCurrentServer().overworld().getDataStorage().computeIfAbsent(dataFactory(), DATA_NAME);
-		else
-			return new MoneyWSD();
+		if (ServerLifecycleHooks.getCurrentServer() != null) {
+			return ServerLifecycleHooks.getCurrentServer().overworld().getDataStorage().computeIfAbsent(TYPE);
+		}
+		return new MoneyWSD();
 	}
 }

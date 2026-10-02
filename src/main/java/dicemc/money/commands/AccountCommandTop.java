@@ -15,10 +15,11 @@ import com.mojang.datafixers.util.Pair;
 
 import dicemc.money.MoneyMod.AcctTypes;
 import dicemc.money.setup.Config;
+import dicemc.money.setup.ServerText;
+import dicemc.money.setup.Profiles;
 import dicemc.money.storage.MoneyWSD;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
-import net.minecraft.network.chat.Component;
 
 public class AccountCommandTop implements Command<CommandSourceStack>{
 	private static final AccountCommandTop CMD = new AccountCommandTop();
@@ -40,12 +41,13 @@ public class AccountCommandTop implements Command<CommandSourceStack>{
 		int limit = sorted.size() > Config.TOP_SIZE.get() ? Config.TOP_SIZE.get() : sorted.size();
 		
 		String tkey = limit == 1 ? "message.command.top1" : "message.command.top";
-		context.getSource().sendSuccess(() -> Component.translatable(tkey, limit), false);
+		context.getSource().sendSuccess(() -> ServerText.to(context.getSource(), tkey, limit), false);
 		for (int i = 0; i < limit; i++) {
 			Pair<UUID, Double> p = sorted.get(i);
-			String name = context.getSource().getServer().getProfileCache().get(p.getFirst()).get().getName();
-			int finalI = i;
-			context.getSource().sendSuccess(() -> Component.literal("#"+(finalI +1)+" "+name+": "+Config.getFormattedCurrency(df, p.getSecond())), false);
+			String name = Profiles.name(context.getSource().getServer(), p.getFirst());
+			String rank = Integer.toString(i + 1);
+			String amount = Config.getFormattedCurrency(df, p.getSecond());
+			context.getSource().sendSuccess(() -> ServerText.to(context.getSource(), "message.command.top.entry", rank, name, amount), false);
 		}
 		return 0;
 	}
