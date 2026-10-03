@@ -216,10 +216,11 @@ You do not remake the sign when the container changes. On a buy or a sell, the s
 
 | What changed in the container | What the next trade does |
 | --- | --- |
-| More of an item the shop already sells | The amount per purchase stays the saved amount. A shop activated with 1 diamond still sells 1 diamond when the chest holds 64. The extra diamonds are stock. |
-| A new item type | It is added on the next trade, at the same price, without remaking the sign. Each slot of that item is its own stack. Those stacks are not added together. Later stacks of that same item do not raise the saved counts. |
+| Another stack of an item the shop already sells | That stack is included. Two stacks of 64 stay two stacks of 64. They are not added into one count. |
+| More items added onto a stack already in a slot | The container holds one stack. The trade uses that live count, not the count stored when the sign was made. |
+| A new item type | It is added on the next trade, at the same price, without remaking the sign. Each slot of that item is its own stack. Those stacks are not added together. |
 | An item removed completely | That item is dropped from the purchase. It is not required anymore. |
-| Some of a listed item left, but less than the saved amount | The saved amount stays. That trade fails for stock. Nothing is paid. |
+| A stack smaller than the count stored when the sign was made | The trade uses the stack that is there. It does not fail because the stack is smaller. |
 | Nothing left | The trade fails for stock. Nothing is paid and nothing is given. |
 
 A vending book is read the same way as at activation. When the page describes an item, the shop uses that item and does not sell the book. Both halves of a double chest are included. The same rules apply to a chest, a trapped chest, a barrel, and every copper chest.

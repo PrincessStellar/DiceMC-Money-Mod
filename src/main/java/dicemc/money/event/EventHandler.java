@@ -478,21 +478,14 @@ public class EventHandler {
 	/**
 	 * Rereads the container the player opens, before any sale.
 	 * Returns null when that container cannot be read. An empty list pays nothing.
-	 * A saved type keeps its saved count. A different item id, or the same id with a different
-	 * component patch, is added from the slot that holds it. Each slot stays its own stack.
+	 * Every live slot is its own stack, including a later stack of an item the sign already stored.
+	 * The count stored on the sign is not reused. A missing type is left out. Slots are not added together.
 	 */
 	private static List<ItemStack> refreshOffer(SignBlockEntity sign, List<ItemStack> present, Level level) {
-		if (present == null) return null;
-		List<ItemStack> saved = readItems(sign.getPersistentData(), level);
+		if (present == null || sign == null || level == null) return null;
 		List<ItemStack> next = new ArrayList<>();
-		for (ItemStack line : saved) {
-			if (line.isEmpty() || line.getCount() <= 0) continue;
-			if (!typePresent(present, line)) continue;
-			addOfferPieces(next, line);
-		}
 		for (ItemStack slot : present) {
-			if (slot.isEmpty() || slot.getCount() <= 0) continue;
-			if (listedType(saved, slot)) continue;
+			if (slot == null || slot.isEmpty() || slot.getCount() <= 0) continue;
 			addOfferPieces(next, slot);
 		}
 		return next;
@@ -502,14 +495,6 @@ public class EventHandler {
 	private static boolean listedType(List<ItemStack> saved, ItemStack slot) {
 		for (ItemStack line : saved) {
 			if (sameType(line, slot)) return true;
-		}
-		return false;
-	}
-
-	/** Any remaining stack of this type keeps the saved line. A short total fails later and pays nothing. */
-	private static boolean typePresent(List<ItemStack> present, ItemStack line) {
-		for (ItemStack slot : present) {
-			if (sameType(slot, line) && slot.getCount() > 0) return true;
 		}
 		return false;
 	}
