@@ -16,7 +16,6 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.nbt.TagParser;
-import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.Filterable;
 import net.minecraft.world.InteractionHand;
@@ -87,8 +86,7 @@ public class ShopCommandBuilder implements Command<CommandSourceStack> {
 		}
 		book.set(DataComponents.WRITABLE_BOOK_CONTENT, new WritableBookContent(List.of(Filterable.passThrough(page))));
 		player.setItemInHand(bookHand, book);
-		Component shown = sample.getDisplayName();
-		context.getSource().sendSuccess(() -> ServerText.to(context.getSource(), "message.command.shop.builder.success", shown), true);
+		context.getSource().sendSuccess(() -> ServerText.to(context.getSource(), "message.command.shop.builder.success"), true);
 		return 1;
 	}
 }

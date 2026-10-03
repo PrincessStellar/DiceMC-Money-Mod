@@ -30,12 +30,12 @@ import net.minecraft.nbt.Tag;
 import net.minecraft.nbt.TagParser;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
-import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.ChatFormatting;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.LevelAccessor;
 import net.minecraft.world.level.block.piston.PistonStructureResolver;
 import net.minecraft.util.TriState;
+import net.minecraft.world.Container;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
@@ -43,6 +43,7 @@ import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.WritableBookContent;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.BarrelBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.WallSignBlock;
@@ -68,6 +69,7 @@ import net.neoforged.neoforge.event.level.block.BreakBlockEvent;
 import net.neoforged.neoforge.transfer.ResourceHandler;
 import net.neoforged.neoforge.transfer.item.ItemResource;
 import net.neoforged.neoforge.transfer.item.PlayerInventoryWrapper;
+import net.neoforged.neoforge.transfer.item.VanillaContainerWrapper;
 import net.neoforged.neoforge.transfer.transaction.Transaction;
 
 @EventBusSubscriber(modid = MoneyMod.MOD_ID)
@@ -198,7 +200,8 @@ public class EventHandler {
 		if (!(event.getLevel().getBlockEntity(event.getPos()) instanceof SignBlockEntity tile)) return;
 		CompoundTag nbt = tile.getPersistentData();
 		if (nbt.contains(ACTIVATED)) {
-			getSaleInfo(nbt, event.getEntity(), event.getLevel());
+			BlockPos back = event.getPos().relative(event.getLevel().getBlockState(event.getPos()).getValue(WallSignBlock.FACING).getOpposite());
+			getSaleInfo(event.getEntity(), containerKind(event.getLevel().getBlockEntity(back)), nbt.getDoubleOr(PRICE, 0));
 		}
 	}
 
@@ -229,6 +232,14 @@ public class EventHandler {
 		if (!(event.getLevel().getBlockEntity(event.getPos()) instanceof SignBlockEntity tile)) return;
 		boolean activated = tile.getPersistentData().contains(ACTIVATED);
 		if (event.getLevel().isClientSide()) {
+			if (activated) {
+				event.setCanceled(true);
+				event.setCancellationResult(InteractionResult.FAIL);
+			}
+			return;
+		}
+		// Both hands fire this event. The off hand must not buy, charge, or mint a second time.
+		if (event.getHand() != InteractionHand.MAIN_HAND) {
 			if (activated) {
 				event.setCanceled(true);
 				event.setCancellationResult(InteractionResult.FAIL);
@@ -300,14 +311,15 @@ public class EventHandler {
 			player.sendSystemMessage(ServerText.to(player, "message.activate.failure.owned"));
 			return false;
 		}
-		ResourceHandler<ItemResource> inv = findStocked(world, storage.getBlockPos());
-		if (inv == null) {
+		Container container = liveContainer(world, storage.getBlockPos(), storage);
+		List<ItemStack> slots = readPresent(world, storage.getBlockPos(), storage, container);
+		if (slots == null || slots.isEmpty()) {
 			player.sendSystemMessage(ServerText.to(player, "message.activate.failure.stock"));
 			return false;
 		}
 		ListTag lnbt = new ListTag();
 		List<ItemStack> pieces = new ArrayList<>();
-		for (ItemStack slot : readContainerSlots(inv, world)) addOfferPieces(pieces, slot);
+		for (ItemStack slot : slots) addOfferPieces(pieces, slot);
 		for (ItemStack piece : pieces) {
 			Tag saved = saveOfferStack(world, piece);
 			if (saved instanceof CompoundTag) lnbt.add(saved);
@@ -357,17 +369,10 @@ public class EventHandler {
 		return stack.copy();
 	}
 
-	private static void getSaleInfo(CompoundTag nbt, Player player, Level level) {
-		String type = nbt.getStringOr(TYPE, "");
-		boolean isBuy = type.equalsIgnoreCase("buy") || type.equalsIgnoreCase("server-buy");
-		List<ItemStack> transItems = readItems(nbt, level);
-		double value = nbt.getDoubleOr(PRICE, 0);
-		MutableComponent itemComponent = ServerText.items(player, transItems);
-		if (isBuy) {
-			player.sendSystemMessage(ServerText.to(player, "message.shop.info", itemComponent, Config.getFormattedCurrency(value)));
-		} else {
-			player.sendSystemMessage(ServerText.to(player, "message.shop.info", Config.getFormattedCurrency(value), itemComponent));
-		}
+	private static void getSaleInfo(Player player, String kind, double value) {
+		player.sendSystemMessage(ServerText.to(player, "message.shop.info",
+				ServerText.containerWord(player, kind),
+				Config.getFormattedCurrency(value)));
 	}
 
 	private static String shopToken(String action) {
@@ -392,28 +397,16 @@ public class EventHandler {
 			player.sendSystemMessage(ServerText.to(player, "message.shop.unknown"));
 			return;
 		}
-		ResourceHandler<ItemResource> inv = findHandler(player.level(), tile.getBlockPos());
-		List<ItemStack> transItems = refreshOffer(sign, inv, player.level());
-		if (transItems == null) {
+		Level level = player.level();
+		Container container = liveContainer(level, tile.getBlockPos(), tile);
+		List<ItemStack> present = readPresent(level, tile.getBlockPos(), tile, container);
+		List<ItemStack> transItems = refreshOffer(sign, present, level);
+		if (transItems == null || transItems.isEmpty()) {
+			if (transItems != null) rememberOffer(sign, level, transItems);
 			player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.stock"));
 			return;
 		}
-		ListTag encoded = encodeOffer(player.level(), transItems);
-		if (transItems.isEmpty() || encoded.isEmpty()) {
-			if (transItems.isEmpty()) {
-				nbt.put(ITEMS, new ListTag());
-				sign.setChanged();
-			}
-			player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.stock"));
-			return;
-		}
-		nbt.put(ITEMS, encoded);
-		sign.setChanged();
-		transItems = readItems(nbt, player.level());
-		if (transItems.isEmpty()) {
-			player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.stock"));
-			return;
-		}
+		String kind = containerKind(tile);
 		UUID shopOwner = readUuid(nbt, OWNER);
 		if (player instanceof ServerPlayer serverPlayer) {
 			String token = shopToken(action);
@@ -422,74 +415,111 @@ public class EventHandler {
 				return;
 			}
 		}
+		ResourceHandler<ItemResource> inv = container != null
+				? VanillaContainerWrapper.of(container)
+				: findHandler(level, tile.getBlockPos());
+		boolean sold;
 		if (action.equalsIgnoreCase("buy")) {
-			buyFromShop(player, inv, transItems, shopOwner, value, encoded);
+			sold = buyFromShop(player, inv, transItems, shopOwner, value, kind);
 		} else if (action.equalsIgnoreCase("sell")) {
-			sellToShop(player, inv, transItems, shopOwner, value, encoded);
+			sold = sellToShop(player, inv, transItems, shopOwner, value);
 		} else if (action.equalsIgnoreCase("server-buy")) {
-			serverBuy(player, transItems, value, encoded);
+			sold = serverBuy(player, transItems, value, kind);
 		} else {
-			serverSell(player, transItems, value, encoded);
+			sold = serverSell(player, transItems, value);
 		}
+		if (sold) rememberOffer(sign, level, transItems);
 	}
 
 	/** Largest count one saved offer line can store. Matches the item codec. */
 	private static final int OFFER_LINE_MAX = 99;
 
 	/**
-	 * Rereads the container once, before any sale. Returns null when the container cannot be read.
-	 * An empty list means the offer is gone and nothing may be paid.
+	 * Rereads the container the player opens, before any sale.
+	 * Returns null when that container cannot be read. An empty list pays nothing.
+	 * A saved type keeps its saved count. A different item id, or the same id with a different
+	 * component patch, is added from the slot that holds it. Each slot stays its own stack.
 	 */
-	private static List<ItemStack> refreshOffer(SignBlockEntity sign, ResourceHandler<ItemResource> inv, Level level) {
-		if (inv == null) return null;
+	private static List<ItemStack> refreshOffer(SignBlockEntity sign, List<ItemStack> present, Level level) {
+		if (present == null) return null;
 		List<ItemStack> saved = readItems(sign.getPersistentData(), level);
-		List<ItemStack> present = readContainerSlots(inv, level);
 		List<ItemStack> next = new ArrayList<>();
 		for (ItemStack line : saved) {
 			if (line.isEmpty() || line.getCount() <= 0) continue;
-			if (countOf(present, line) <= 0) continue;
+			if (!typePresent(present, line)) continue;
 			addOfferPieces(next, line);
 		}
-		List<ItemStack> added = new ArrayList<>();
 		for (ItemStack slot : present) {
 			if (slot.isEmpty() || slot.getCount() <= 0) continue;
-			if (countOf(saved, slot) > 0) continue;
-			mergeOffer(added, slot);
+			if (listedType(saved, slot)) continue;
+			addOfferPieces(next, slot);
 		}
-		for (ItemStack stack : added) addOfferPieces(next, stack);
 		return next;
 	}
 
-	private static List<ItemStack> readContainerSlots(ResourceHandler<ItemResource> inv, Level level) {
+	/** True when a saved line already names this exact item id and component patch. */
+	private static boolean listedType(List<ItemStack> saved, ItemStack slot) {
+		for (ItemStack line : saved) {
+			if (sameType(line, slot)) return true;
+		}
+		return false;
+	}
+
+	/** Any remaining stack of this type keeps the saved line. A short total fails later and pays nothing. */
+	private static boolean typePresent(List<ItemStack> present, ItemStack line) {
+		for (ItemStack slot : present) {
+			if (sameType(slot, line) && slot.getCount() > 0) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * The chest or barrel inventory the menu writes. A double chest is both halves.
+	 * This is not the first item capability, which can be a different handler.
+	 */
+	private static Container liveContainer(Level level, BlockPos pos, BlockEntity tile) {
+		BlockState state = level.getBlockState(pos);
+		if (state.getBlock() instanceof ChestBlock chest) {
+			Container combined = ChestBlock.getContainer(chest, state, level, pos, true);
+			if (combined != null) return combined;
+		}
+		BlockEntity other = connectedChest(tile);
+		if (tile instanceof Container self && other instanceof Container second && other != tile) {
+			return new net.minecraft.world.CompoundContainer(self, second);
+		}
+		if (tile instanceof Container self) return self;
+		return null;
+	}
+
+	private static List<ItemStack> readPresent(Level level, BlockPos pos, BlockEntity tile, Container container) {
+		if (container != null) return readDirect(container, level);
+		ResourceHandler<ItemResource> handler = findHandler(level, pos);
+		if (handler == null) return null;
 		List<ItemStack> slots = new ArrayList<>();
-		for (int i = 0; i < inv.size(); i++) {
-			if (inv.getAmountAsInt(i) <= 0 || inv.getResource(i).isEmpty()) continue;
-			ItemStack inSlot = inv.getResource(i).toStack(inv.getAmountAsInt(i));
-			ItemStack offer = offerStackFromSlot(inSlot, level);
-			if (!offer.isEmpty() && offer.getCount() > 0) slots.add(offer);
+		for (int i = 0; i < handler.size(); i++) {
+			int amount = handler.getAmountAsInt(i);
+			if (amount <= 0 || handler.getResource(i).isEmpty()) continue;
+			acceptSlot(slots, handler.getResource(i).toStack(amount), level);
 		}
 		return slots;
 	}
 
-	private static int countOf(List<ItemStack> stacks, ItemStack needle) {
-		int total = 0;
-		for (ItemStack stack : stacks) {
-			if (sameItem(stack, needle)) total += stack.getCount();
+	/** Slot counts come from the container itself, not from an item-resource snapshot. */
+	private static List<ItemStack> readDirect(Container container, Level level) {
+		List<ItemStack> slots = new ArrayList<>();
+		for (int i = 0; i < container.getContainerSize(); i++) {
+			acceptSlot(slots, container.getItem(i), level);
 		}
-		return total;
+		return slots;
 	}
 
-	private static void mergeOffer(List<ItemStack> into, ItemStack stack) {
-		for (ItemStack existing : into) {
-			if (!sameItem(existing, stack)) continue;
-			if (existing.getCount() > Integer.MAX_VALUE - stack.getCount()) return;
-			existing.grow(stack.getCount());
-			return;
-		}
-		into.add(stack.copy());
+	private static void acceptSlot(List<ItemStack> slots, ItemStack stack, Level level) {
+		if (stack == null || stack.isEmpty() || stack.getCount() <= 0) return;
+		ItemStack offer = offerStackFromSlot(stack, level);
+		if (!offer.isEmpty() && offer.getCount() > 0) slots.add(offer);
 	}
 
-	/** Keeps the per-sale count. A count above the codec limit is split without changing the total. */
+	/** Keeps one slot as its own stack. A count above the codec limit is split only within that stack. */
 	private static void addOfferPieces(List<ItemStack> dest, ItemStack stack) {
 		int left = stack.getCount();
 		while (left > 0) {
@@ -521,128 +551,175 @@ public class EventHandler {
 		}
 	}
 
-	private static void buyFromShop(Player player, ResourceHandler<ItemResource> inv, List<ItemStack> transItems, UUID shopOwner, double value, ListTag itemsList) {
+	private static boolean buyFromShop(Player player, ResourceHandler<ItemResource> inv, List<ItemStack> transItems, UUID shopOwner, double value, String kind) {
 		MoneyWSD wsd = MoneyWSD.get();
 		if (shopOwner == null || inv == null) {
 			player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.stock"));
-			return;
+			return false;
 		}
 		if (value > wsd.getBalance(AcctTypes.PLAYER.key, player.getUUID())) {
 			player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.funds"));
-			return;
+			return false;
 		}
 		List<ItemStack> given = new ArrayList<>();
 		try (Transaction tx = Transaction.openRoot()) {
 			if (!extractAll(inv, transItems, given, tx)) {
 				player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.stock"));
-				return;
+				return false;
+			}
+			if (totalCount(given) != totalCount(transItems)) {
+				player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.stock"));
+				return false;
 			}
 			if (!wsd.transferFunds(AcctTypes.PLAYER.key, player.getUUID(), AcctTypes.PLAYER.key, shopOwner, value)) {
 				player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.funds"));
-				return;
+				return false;
 			}
 			tx.commit();
 		}
 		giveToPlayer(player, given);
 		postHistory(player.getUUID(), AcctTypes.PLAYER.key, player.getName().getString(), shopOwner, AcctTypes.PLAYER.key,
-				Profiles.name(player.level().getServer(), shopOwner), value, itemsList.toString());
+				Profiles.name(player.level().getServer(), shopOwner), value, describe(player.level(), transItems));
 		String price = Config.getFormattedCurrency(value);
-		player.sendOverlayMessage(ServerText.to(player, "message.shop.buy.success", ServerText.items(player, transItems), price));
+		player.sendSystemMessage(ServerText.to(player, "message.shop.buy.success",
+				ServerText.containerWord(player, kind), ServerText.greenMoney(price)));
 		if (player.level().getServer() != null) {
 			ServerText.broadcast(player.level().getServer(), "message.shop.buy.broadcast", lang -> new Object[] {
-					player.getName(), ServerText.items(lang, transItems), price
+					player.getName().getString(), ServerText.containerWord(lang, kind), ServerText.greenMoney(price)
 			});
 		}
+		return true;
 	}
 
-	private static void sellToShop(Player player, ResourceHandler<ItemResource> inv, List<ItemStack> transItems, UUID shopOwner, double value, ListTag itemsList) {
+	private static boolean sellToShop(Player player, ResourceHandler<ItemResource> inv, List<ItemStack> transItems, UUID shopOwner, double value) {
 		MoneyWSD wsd = MoneyWSD.get();
 		if (shopOwner == null || inv == null) {
 			player.sendSystemMessage(ServerText.to(player, "message.shop.sell.failure.space"));
-			return;
+			return false;
 		}
 		if (value > wsd.getBalance(AcctTypes.PLAYER.key, shopOwner)) {
 			player.sendSystemMessage(ServerText.to(player, "message.shop.sell.failure.funds"));
-			return;
+			return false;
 		}
 		ResourceHandler<ItemResource> playerInv = PlayerInventoryWrapper.of(player);
 		try (Transaction tx = Transaction.openRoot()) {
 			List<ItemStack> taken = new ArrayList<>();
-			if (!extractAll(playerInv, transItems, taken, tx)) {
+			if (!extractAll(playerInv, transItems, taken, tx) || totalCount(taken) != totalCount(transItems)) {
 				player.sendSystemMessage(ServerText.to(player, "message.shop.sell.failure.stock"));
-				return;
+				return false;
 			}
 			if (!insertAll(inv, taken, tx)) {
 				player.sendSystemMessage(ServerText.to(player, "message.shop.sell.failure.space"));
-				return;
+				return false;
 			}
 			if (!wsd.transferFunds(AcctTypes.PLAYER.key, shopOwner, AcctTypes.PLAYER.key, player.getUUID(), value)) {
 				player.sendSystemMessage(ServerText.to(player, "message.shop.sell.failure.funds"));
-				return;
+				return false;
 			}
 			tx.commit();
 		}
 		postHistory(shopOwner, AcctTypes.PLAYER.key, Profiles.name(player.level().getServer(), shopOwner),
-				player.getUUID(), AcctTypes.PLAYER.key, player.getName().getString(), value, itemsList.toString());
+				player.getUUID(), AcctTypes.PLAYER.key, player.getName().getString(), value, describe(player.level(), transItems));
 		player.sendSystemMessage(ServerText.to(player, "message.shop.sell.success",
-				Config.getFormattedCurrency(value), ServerText.items(player, transItems)));
+				Config.getFormattedCurrency(value)));
+		return true;
 	}
 
-	private static void serverBuy(Player player, List<ItemStack> transItems, double value, ListTag itemsList) {
-		MoneyWSD wsd = MoneyWSD.get();
-		if (value > wsd.getBalance(AcctTypes.PLAYER.key, player.getUUID())) {
+	private static boolean serverBuy(Player player, List<ItemStack> transItems, double value, String kind) {
+		if (!MoneyWSD.get().tryTake(AcctTypes.PLAYER.key, player.getUUID(), value)) {
 			player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.funds"));
-			return;
-		}
-		if (!wsd.changeBalance(AcctTypes.PLAYER.key, player.getUUID(), -value)) {
-			player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.funds"));
-			return;
+			return false;
 		}
 		List<ItemStack> copies = new ArrayList<>();
-		for (ItemStack stack : transItems) copies.add(stack.copy());
+		for (ItemStack stack : transItems) {
+			if (stack == null || stack.isEmpty() || stack.getCount() <= 0 || stack.getCount() > OFFER_LINE_MAX) {
+				MoneyWSD.get().changeBalance(AcctTypes.PLAYER.key, player.getUUID(), value);
+				player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.stock"));
+				return false;
+			}
+			copies.add(stack.copy());
+		}
 		giveToPlayer(player, copies);
 		postHistory(DatabaseManager.NIL, AcctTypes.SERVER.key, "Server", player.getUUID(), AcctTypes.PLAYER.key,
-				player.getName().getString(), -value, itemsList.toString());
+				player.getName().getString(), -value, describe(player.level(), transItems));
 		player.sendSystemMessage(ServerText.to(player, "message.shop.buy.success",
-				ServerText.items(player, transItems), Config.getFormattedCurrency(value)));
+				ServerText.containerWord(player, kind), ServerText.greenMoney(Config.getFormattedCurrency(value))));
+		return true;
 	}
 
-	private static void serverSell(Player player, List<ItemStack> transItems, double value, ListTag itemsList) {
+	private static boolean serverSell(Player player, List<ItemStack> transItems, double value) {
 		ResourceHandler<ItemResource> playerInv = PlayerInventoryWrapper.of(player);
 		try (Transaction tx = Transaction.openRoot()) {
 			if (!extractAll(playerInv, transItems, new ArrayList<>(), tx)) {
 				player.sendSystemMessage(ServerText.to(player, "message.shop.sell.failure.stock"));
-				return;
+				return false;
 			}
 			if (!MoneyWSD.get().changeBalance(AcctTypes.PLAYER.key, player.getUUID(), value)) {
 				player.sendSystemMessage(ServerText.to(player, "message.shop.sell.failure.funds"));
-				return;
+				return false;
 			}
 			tx.commit();
 		}
 		postHistory(DatabaseManager.NIL, AcctTypes.SERVER.key, "Server", player.getUUID(), AcctTypes.PLAYER.key,
-				player.getName().getString(), value, itemsList.toString());
+				player.getName().getString(), value, describe(player.level(), transItems));
 		player.sendSystemMessage(ServerText.to(player, "message.shop.sell.success",
-				Config.getFormattedCurrency(value), ServerText.items(player, transItems)));
+				Config.getFormattedCurrency(value)));
+		return true;
 	}
 
-	/** Pulls every requested stack. Returns false without committing if any amount is short. */
+	/**
+	 * Pulls every requested stack from matching slots. The slot's own resource is what leaves,
+	 * so a saved copy with a different component map cannot skip the real stack or mint another.
+	 * Returns false without committing when any amount is short.
+	 */
 	private static boolean extractAll(ResourceHandler<ItemResource> handler, List<ItemStack> wanted, List<ItemStack> out, Transaction tx) {
+		if (handler == null || wanted == null || wanted.isEmpty()) return false;
+		int expected = totalCount(wanted);
+		if (expected <= 0) return false;
 		for (ItemStack want : wanted) {
-			if (want.isEmpty() || want.getCount() <= 0) return false;
-			ItemResource resource = ItemResource.of(want);
+			if (want.isEmpty() || want.getCount() <= 0 || want.getCount() > OFFER_LINE_MAX) return false;
 			int need = want.getCount();
 			for (int slot = 0; slot < handler.size() && need > 0; slot++) {
-				if (!handler.getResource(slot).equals(resource)) continue;
+				int have = handler.getAmountAsInt(slot);
+				if (have <= 0 || handler.getResource(slot).isEmpty()) continue;
+				ItemStack live = handler.getResource(slot).toStack(Math.min(have, OFFER_LINE_MAX));
+				if (!sameType(live, want)) continue;
+				ItemResource resource = handler.getResource(slot);
 				int got = handler.extract(slot, resource, need, tx);
-				if (got > 0) {
-					out.add(resource.toStack(got));
-					need -= got;
-				}
+				if (got <= 0) continue;
+				ItemStack piece = resource.toStack(got);
+				if (piece.isEmpty() || piece.getCount() != got || piece.getCount() > OFFER_LINE_MAX) return false;
+				out.add(piece);
+				need -= got;
 			}
 			if (need > 0) return false;
 		}
-		return true;
+		return totalCount(out) == expected;
+	}
+
+	private static int totalCount(List<ItemStack> stacks) {
+		int total = 0;
+		if (stacks == null) return 0;
+		for (ItemStack stack : stacks) {
+			if (stack == null || stack.isEmpty() || stack.getCount() <= 0) continue;
+			total += stack.getCount();
+		}
+		return total;
+	}
+
+	private static String describe(Level level, List<ItemStack> stacks) {
+		ListTag encoded = encodeOffer(level, stacks);
+		return encoded.toString();
+	}
+
+	private static void rememberOffer(SignBlockEntity sign, Level level, List<ItemStack> stacks) {
+		ListTag encoded = encodeOffer(level, stacks);
+		if (encoded.size() != stacks.size()) {
+			MoneyMod.LOGGER.warn("Shop offer did not store every stack");
+			return;
+		}
+		sign.getPersistentData().put(ITEMS, encoded);
+		sign.setChanged();
 	}
 
 	/** Inserts every stack. Returns false if any remainder cannot fit. */
@@ -659,21 +736,49 @@ public class EventHandler {
 		return true;
 	}
 
+	/**
+	 * Gives each offer stack by itself. Stacks are not added together, and a stack is not merged
+	 * into another stack of the same item already in the inventory.
+	 */
 	private static void giveToPlayer(Player player, List<ItemStack> stacks) {
+		if (stacks == null) return;
 		for (ItemStack stack : stacks) {
-			if (!player.addItem(stack)) player.drop(stack, false);
+			if (stack == null || stack.isEmpty() || stack.getCount() <= 0) continue;
+			int left = stack.getCount();
+			int limit = Math.min(OFFER_LINE_MAX, Math.max(1, stack.getMaxStackSize()));
+			while (left > 0) {
+				int piece = Math.min(limit, left);
+				ItemStack part = stack.copy();
+				part.setCount(piece);
+				if (part.isEmpty() || part.getCount() <= 0 || part.getCount() > OFFER_LINE_MAX) {
+					MoneyMod.LOGGER.warn("Shop give skipped a stack");
+					break;
+				}
+				placeSeparate(player, part);
+				left -= piece;
+			}
 		}
 	}
 
-	private static ResourceHandler<ItemResource> findStocked(Level world, BlockPos pos) {
-		for (Direction side : sides()) {
-			ResourceHandler<ItemResource> inv = world.getCapability(Capabilities.Item.BLOCK, pos, side);
-			if (inv == null) continue;
-			for (int i = 0; i < inv.size(); i++) {
-				if (inv.getAmountAsInt(i) > 0 && !inv.getResource(i).isEmpty()) return inv;
-			}
+	private static void placeSeparate(Player player, ItemStack part) {
+		int slot = player.getInventory().getFreeSlot();
+		if (slot < 0) {
+			player.drop(part, false);
+			return;
 		}
-		return null;
+		player.getInventory().setItem(slot, part);
+		if (player instanceof ServerPlayer serverPlayer) {
+			serverPlayer.connection.send(player.getInventory().createInventoryUpdatePacket(slot));
+		}
+	}
+
+	/** chest, barrel, or other. Used only to pick the container word in a finished sentence. */
+	private static String containerKind(BlockEntity tile) {
+		if (tile == null) return "other";
+		Block block = tile.getBlockState().getBlock();
+		if (block instanceof BarrelBlock) return "barrel";
+		if (block instanceof ChestBlock) return "chest";
+		return "other";
 	}
 
 	private static ResourceHandler<ItemResource> findHandler(Level world, BlockPos pos) {
@@ -703,8 +808,11 @@ public class EventHandler {
 		return items;
 	}
 
-	private static boolean sameItem(ItemStack a, ItemStack b) {
-		return ItemStack.isSameItemSameComponents(a, b);
+	/** Same item id and the same component patch. A different id is never the same type. */
+	private static boolean sameType(ItemStack a, ItemStack b) {
+		if (a == null || b == null || a.isEmpty() || b.isEmpty()) return false;
+		if (a.getItem() != b.getItem()) return false;
+		return a.getComponentsPatch().equals(b.getComponentsPatch());
 	}
 
 	private static Tag saveStack(Level level, ItemStack stack) {

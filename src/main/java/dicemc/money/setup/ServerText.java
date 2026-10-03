@@ -3,10 +3,8 @@ package dicemc.money.setup;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
@@ -16,23 +14,40 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import dicemc.money.MoneyMod;
+import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Style;
+import net.minecraft.network.chat.TextColor;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.item.ItemStack;
 
 /**
  * Writes money sentences on the server from en_us.json and pt_br.json.
- * The client does not need this mod. Item arguments stay components.
+ * The client does not need this mod. Chat lines do not name items.
  */
 public final class ServerText {
 	private static final String FALLBACK = "The command could not be completed.";
 	private static final Map<String, String> EN = load("en_us");
 	private static final Map<String, String> PT = load("pt_br");
 	private static final Set<String> MISSING = new HashSet<>();
+	/** Named "white" is not used. A client that substitutes that name would paint the whole sentence. */
+	private static final Style PURCHASE_WORDS = Style.EMPTY
+			.withColor(TextColor.fromRgb(0xFFFFFF))
+			.withBold(Boolean.FALSE)
+			.withItalic(Boolean.FALSE)
+			.withUnderlined(Boolean.FALSE)
+			.withStrikethrough(Boolean.FALSE)
+			.withObfuscated(Boolean.FALSE);
+	private static final Style PURCHASE_PRICE = Style.EMPTY
+			.withColor(TextColor.fromRgb(0x55FF55))
+			.withBold(Boolean.FALSE)
+			.withItalic(Boolean.FALSE)
+			.withUnderlined(Boolean.FALSE)
+			.withStrikethrough(Boolean.FALSE)
+			.withObfuscated(Boolean.FALSE);
 
 	private ServerText() {}
 
@@ -58,24 +73,19 @@ public final class ServerText {
 		return format("en_us", key, args);
 	}
 
-	public static MutableComponent items(Player player, List<ItemStack> list) {
+	/** Plain container word for a finished sentence. Not an item component. */
+	public static String containerWord(Player player, String kind) {
 		String lang = player instanceof ServerPlayer serverPlayer ? language(serverPlayer) : "en_us";
-		return items(lang, list);
+		return containerWord(lang, kind);
 	}
 
-	public static MutableComponent items(String lang, List<ItemStack> list) {
-		String separator = text(lang, "message.shop.separator");
-		if (separator == null) separator = ", ";
-		String stack = text(lang, "message.shop.stack");
-		if (stack == null) stack = "%s x %s";
-		MutableComponent out = Component.empty();
-		boolean first = true;
-		for (ItemStack item : merged(list)) {
-			if (!first && !separator.isEmpty()) out.append(Component.literal(separator));
-			first = false;
-			out.append(fill(stack, Integer.toString(item.getCount()), item.getDisplayName()));
-		}
-		return out;
+	public static String containerWord(String lang, String kind) {
+		String name = kind == null ? "other" : kind;
+		if (!name.equals("chest") && !name.equals("barrel") && !name.equals("other")) name = "other";
+		String word = text(lang, "message.shop.container." + name);
+		if (word == null) word = text("en_us", "message.shop.container." + name);
+		if (word == null) return "container";
+		return word;
 	}
 
 	/** Logs the English sentence, then sends each player the sentence for their language. */
@@ -93,7 +103,34 @@ public final class ServerText {
 			if (pattern == null) pattern = FALLBACK;
 			args = new Object[0];
 		}
-		return fill(pattern, args);
+		boolean purchase = "message.shop.buy.success".equals(key) || "message.shop.buy.broadcast".equals(key);
+		MutableComponent body = fill(pattern, args, purchase);
+		if (purchase) return body.withStyle(PURCHASE_WORDS);
+		ChatFormatting tone = tone(key);
+		if (tone == null) return body;
+		return Component.empty().withStyle(tone).append(body);
+	}
+
+	/** The money amount in a purchase sentence. The other words stay white. */
+	public static MutableComponent greenMoney(String formatted) {
+		return Component.literal(formatted == null ? "" : formatted).withStyle(PURCHASE_PRICE);
+	}
+
+	/** Sell success is green. Failure is red. A purchase sentence is not colored here. */
+	private static ChatFormatting tone(String key) {
+		if (key == null || key.equals("message.shop.info")) return null;
+		if (key.equals("message.shop.sell.success")
+				|| key.equals("message.command.shop.builder.success")) {
+			return ChatFormatting.GREEN;
+		}
+		if (key.startsWith("message.activate.failure.")
+				|| key.startsWith("message.shop.buy.failure.")
+				|| key.startsWith("message.shop.sell.failure.")
+				|| key.equals("message.shop.unknown")
+				|| key.equals("message.shop.cancelled")) {
+			return ChatFormatting.RED;
+		}
+		return null;
 	}
 
 	/** Portuguese falls back to English. A missing English line returns null. */
@@ -105,41 +142,28 @@ public final class ServerText {
 		return EN.get(key);
 	}
 
-	private static MutableComponent fill(String pattern, Object... args) {
-		MutableComponent out = Component.empty();
+	private static MutableComponent fill(String pattern, Object[] args, boolean whiteWords) {
+		MutableComponent out = whiteWords ? Component.literal("").withStyle(PURCHASE_WORDS) : Component.empty();
 		int arg = 0;
 		int cursor = 0;
 		while (cursor < pattern.length()) {
 			int mark = pattern.indexOf("%s", cursor);
 			if (mark < 0) {
-				out.append(Component.literal(pattern.substring(cursor)));
+				out.append(words(pattern.substring(cursor), whiteWords));
 				break;
 			}
-			if (mark > cursor) out.append(Component.literal(pattern.substring(cursor, mark)));
+			if (mark > cursor) out.append(words(pattern.substring(cursor, mark), whiteWords));
 			Object value = arg < args.length ? args[arg++] : "";
 			if (value instanceof Component component) out.append(component);
-			else out.append(Component.literal(String.valueOf(value)));
+			else out.append(words(String.valueOf(value), whiteWords));
 			cursor = mark + 2;
 		}
 		return out;
 	}
 
-	private static List<ItemStack> merged(List<ItemStack> list) {
-		List<ItemStack> items = new ArrayList<>();
-		if (list == null) return items;
-		for (ItemStack incoming : list) {
-			if (incoming == null || incoming.isEmpty()) continue;
-			boolean hadMatch = false;
-			for (ItemStack existing : items) {
-				if (ItemStack.isSameItemSameComponents(incoming, existing)) {
-					existing.grow(incoming.getCount());
-					hadMatch = true;
-					break;
-				}
-			}
-			if (!hadMatch) items.add(incoming.copy());
-		}
-		return items;
+	private static MutableComponent words(String text, boolean white) {
+		MutableComponent literal = Component.literal(text);
+		return white ? literal.withStyle(PURCHASE_WORDS) : literal;
 	}
 
 	private static Map<String, String> load(String code) {

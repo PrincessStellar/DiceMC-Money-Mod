@@ -167,11 +167,13 @@ That sign sells whatever is in the container. It does not read the words "diamon
 
 | Action | Result |
 | --- | --- |
-| Left-click the sign | Shows the trade in chat. |
+| Left-click the sign | Shows the price in chat. The sentence does not name the items. |
 | Right-click a `[buy]` sign | You pay the owner and receive the items. The items are taken from the container. |
 | Right-click a `[sell]` sign | You give the items and the owner pays you. The items must fit in the container. |
 
 A `[buy]` purchase is also announced to the server in the third person, so other players do not see "you bought". If your inventory cannot hold the items, the rest drops at your feet. `[server-buy]` tells only the buyer.
+
+A purchase is one green sentence and does not name the items. A chest uses the word chest. A barrel uses the word barrel. In Portuguese those words are baú and barril. A completed sale, and the purchase announcement, are green for the whole sentence. A failure is one red sentence. Other money lines stay plain. The sign text and a shop book keep whatever was written on them.
 
 Each purchase and sale rereads the container before anything moves. See [Offer updates](#offer-updates). The buy fails when the container does not have the current offer, or when you cannot pay. The sell fails when you do not have the items, when the container is full, or when the owner cannot pay. No money moves on a failed trade.
 
@@ -215,16 +217,18 @@ You do not remake the sign when the container changes. On a buy or a sell, the s
 | What changed in the container | What the next trade does |
 | --- | --- |
 | More of an item the shop already sells | The amount per purchase stays the saved amount. A shop activated with 1 diamond still sells 1 diamond when the chest holds 64. The extra diamonds are stock. |
-| A new item type | It is added. The amount per purchase is how many are in the container the first time the shop sees that item. Later extras do not raise that amount. |
+| A new item type | It is added on the next trade, at the same price, without remaking the sign. Each slot of that item is its own stack. Those stacks are not added together. Later stacks of that same item do not raise the saved counts. |
 | An item removed completely | That item is dropped from the purchase. It is not required anymore. |
 | Some of a listed item left, but less than the saved amount | The saved amount stays. That trade fails for stock. Nothing is paid. |
 | Nothing left | The trade fails for stock. Nothing is paid and nothing is given. |
 
 A vending book is read the same way as at activation. When the page describes an item, the shop uses that item and does not sell the book. Both halves of a double chest are included. The same rules apply to a chest, a trapped chest, a barrel, and every copper chest.
 
+Stacks of the same item stay separate. A shop that holds 64, 64, and 32 gives 64, 64, and 32. It does not add those counts into one stack. The same rule applies to any other combination.
+
 `[server-buy]` gives copies of the updated offer and leaves the container alone, so a new item stays in the container and is included again on the next purchase. `[server-sell]` takes the updated offer from the player and does not insert it. A player `[buy]` takes the offer counts from the container. A player `[sell]` takes them from the player and inserts them.
 
-The reread happens before items or money move, and it does not run again during that trade. A failed trade does not pay. This behavior has not been tried on a running server.
+The reread happens before items or money move, and it does not run again during that trade. A failed trade does not pay. A player shop takes the items from the container. It does not create a second copy. A server buy creates the items and leaves the container as it is.
 
 ## What a shop blocks
 
