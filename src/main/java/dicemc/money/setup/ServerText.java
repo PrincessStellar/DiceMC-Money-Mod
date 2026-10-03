@@ -127,7 +127,8 @@ public final class ServerText {
 				|| key.startsWith("message.shop.buy.failure.")
 				|| key.startsWith("message.shop.sell.failure.")
 				|| key.equals("message.shop.unknown")
-				|| key.equals("message.shop.cancelled")) {
+				|| key.equals("message.shop.cancelled")
+				|| (key.startsWith("message.command.shop.builder") && !key.equals("message.command.shop.builder.success"))) {
 			return ChatFormatting.RED;
 		}
 		return null;

@@ -2,8 +2,13 @@ package dicemc.money.event;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -22,6 +27,7 @@ import dicemc.money.storage.MoneyWSD;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.UUIDUtil;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -31,12 +37,19 @@ import net.minecraft.nbt.TagParser;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 import net.minecraft.ChatFormatting;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.LevelAccessor;
 import net.minecraft.world.level.block.piston.PistonStructureResolver;
 import net.minecraft.util.TriState;
+import net.minecraft.world.CompoundContainer;
 import net.minecraft.world.Container;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.ContainerUser;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.inventory.ChestMenu;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.DyeColor;
@@ -65,6 +78,7 @@ import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.level.ChunkWatchEvent;
 import net.neoforged.neoforge.event.level.ExplosionEvent;
 import net.neoforged.neoforge.event.level.PistonEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.event.level.block.BreakBlockEvent;
 import net.neoforged.neoforge.transfer.ResourceHandler;
 import net.neoforged.neoforge.transfer.item.ItemResource;
@@ -81,6 +95,21 @@ public class EventHandler {
 	public static final String TYPE = "shop-type";
 	public static final String PRICE = "price";
 	private static boolean claimCheckFailed;
+	private static int shopPulse;
+	private static final List<WatchedShop> WATCHED = new ArrayList<>();
+
+	/** An activated shop sign. The tick refresh only walks this list. */
+	private static final class WatchedShop {
+		final ResourceKey<Level> dimension;
+		BlockPos container;
+		final BlockPos sign;
+
+		WatchedShop(ResourceKey<Level> dimension, BlockPos container, BlockPos sign) {
+			this.dimension = dimension;
+			this.container = container;
+			this.sign = sign;
+		}
+	}
 
 	@SubscribeEvent
 	public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
@@ -132,12 +161,14 @@ public class EventHandler {
 					if (!hasPerms) {
 						event.setCanceled(true);
 						event.setNotifyClient(true);
+						return;
 					}
 				} else {
 					BlockPos backBlock = event.getPos().relative(tile.getBlockState().getValue(WallSignBlock.FACING).getOpposite());
 					BlockEntity back = event.getLevel().getBlockEntity(backBlock);
 					if (back != null) clearShopMark(back);
 				}
+				unwatch(event.getLevel(), event.getPos());
 			}
 			return;
 		}
@@ -147,6 +178,8 @@ public class EventHandler {
 			if (player == null || !OpCheck.has(player, Config.ADMIN_LEVEL.get())) {
 				event.setCanceled(true);
 				event.setNotifyClient(true);
+			} else {
+				unwatch(event.getLevel(), event.getPos());
 			}
 		}
 	}
@@ -208,10 +241,14 @@ public class EventHandler {
 	@SubscribeEvent
 	public static void onSignLoad(ChunkWatchEvent.Watch event) {
 		LevelChunk chunk = event.getChunk();
+		Level chunkLevel = chunk.getLevel();
 		for (var entry : chunk.getBlockEntities().entrySet()) {
 			if (!(entry.getValue() instanceof SignBlockEntity sign)) continue;
 			if (!(sign.getBlockState().getBlock() instanceof WallSignBlock)) continue;
 			if (!sign.getPersistentData().contains(ACTIVATED)) continue;
+			BlockPos signPos = entry.getKey();
+			BlockPos back = signPos.relative(sign.getBlockState().getValue(WallSignBlock.FACING).getOpposite());
+			watchShop(chunkLevel, back, signPos);
 			if (!Arrays.stream(sign.getFrontText().getMessages(false)).allMatch(CommonComponents.EMPTY::equals)) continue;
 			Component[] text = sign.getFrontText().getMessages(true);
 			sign.setText(new SignText(text, text, DyeColor.BLACK, false), true);
@@ -312,7 +349,7 @@ public class EventHandler {
 			return false;
 		}
 		Container container = liveContainer(world, storage.getBlockPos(), storage);
-		List<ItemStack> slots = readPresent(world, storage.getBlockPos(), storage, container);
+		List<ItemStack> slots = readShopSlots(world, storage, container, player);
 		if (slots == null || slots.isEmpty()) {
 			player.sendSystemMessage(ServerText.to(player, "message.activate.failure.stock"));
 			return false;
@@ -343,6 +380,7 @@ public class EventHandler {
 		tile.getPersistentData().put(ITEMS, lnbt);
 		tile.setChanged();
 		markShopStorage(storage, player.getUUID());
+		watchShop(world, storage.getBlockPos(), pos);
 		BlockState state = world.getBlockState(pos);
 		world.sendBlockUpdated(pos, state, state, Block.UPDATE_CLIENTS);
 		return true;
@@ -399,7 +437,7 @@ public class EventHandler {
 		}
 		Level level = player.level();
 		Container container = liveContainer(level, tile.getBlockPos(), tile);
-		List<ItemStack> present = readPresent(level, tile.getBlockPos(), tile, container);
+		List<ItemStack> present = readShopSlots(level, tile, container, player);
 		List<ItemStack> transItems = refreshOffer(sign, present, level);
 		if (transItems == null || transItems.isEmpty()) {
 			if (transItems != null) rememberOffer(sign, level, transItems);
@@ -415,9 +453,12 @@ public class EventHandler {
 				return;
 			}
 		}
-		ResourceHandler<ItemResource> inv = container != null
-				? VanillaContainerWrapper.of(container)
-				: findHandler(level, tile.getBlockPos());
+		boolean buying = action.equalsIgnoreCase("buy") || action.equalsIgnoreCase("server-buy");
+		if (buying && !stockCovers(present, transItems)) {
+			player.sendSystemMessage(ServerText.to(player, "message.shop.buy.failure.stock"));
+			return;
+		}
+		ResourceHandler<ItemResource> inv = container != null ? VanillaContainerWrapper.of(container) : null;
 		boolean sold;
 		if (action.equalsIgnoreCase("buy")) {
 			sold = buyFromShop(player, inv, transItems, shopOwner, value, kind);
@@ -491,17 +532,44 @@ public class EventHandler {
 		return null;
 	}
 
-	private static List<ItemStack> readPresent(Level level, BlockPos pos, BlockEntity tile, Container container) {
-		if (container != null) return readDirect(container, level);
-		ResourceHandler<ItemResource> handler = findHandler(level, pos);
-		if (handler == null) return null;
-		List<ItemStack> slots = new ArrayList<>();
-		for (int i = 0; i < handler.size(); i++) {
-			int amount = handler.getAmountAsInt(i);
-			if (amount <= 0 || handler.getResource(i).isEmpty()) continue;
-			acceptSlot(slots, handler.getResource(i).toStack(amount), level);
+	/**
+	 * The block entity's slots, plus a type that is only visible in an open menu or on a side.
+	 * A type already in the block entity is not added again. Null when nothing can be read.
+	 */
+	private static List<ItemStack> readShopSlots(Level level, BlockEntity tile, Container container, Player actor) {
+		flushOpenMenus(level, tile, container, actor);
+		List<ItemStack> base = new ArrayList<>();
+		if (container != null) base.addAll(readDirect(container, level));
+		else if (tile instanceof Container self) base.addAll(readDirect(self, level));
+		List<ItemStack> origin = new ArrayList<>(base);
+		List<ItemStack> fromEntity = entityExtras(level, tile, container, origin);
+		List<ItemStack> fromMenu = menuExtras(level, tile, container, actor);
+		List<ItemStack> absentMenu = new ArrayList<>();
+		for (ItemStack stack : fromMenu) {
+			if (!listedType(origin, stack)) absentMenu.add(stack);
 		}
-		return slots;
+		invalidateShopCapabilities(tile);
+		List<ItemStack> fromSides = capabilityExtras(level, tile, origin);
+		base.addAll(mergeMaxByType(mergeMaxByType(fromEntity, absentMenu), fromSides));
+		boolean anyView = container != null || tile instanceof Container || !fromEntity.isEmpty() || !fromMenu.isEmpty() || !fromSides.isEmpty();
+		if (!anyView) return null;
+		return base;
+	}
+
+	/** Slots on the block entity, and the other chest half, that the combined container list does not have. */
+	private static List<ItemStack> entityExtras(Level level, BlockEntity tile, Container combined, List<ItemStack> origin) {
+		List<ItemStack> found = new ArrayList<>();
+		collectEntitySlots(found, level, tile, combined, origin);
+		BlockEntity other = connectedChest(tile);
+		if (other != null) collectEntitySlots(found, level, other, combined, origin);
+		return found;
+	}
+
+	private static void collectEntitySlots(List<ItemStack> found, Level level, BlockEntity block, Container combined, List<ItemStack> origin) {
+		if (!(block instanceof Container self) || self == combined) return;
+		for (ItemStack stack : readDirect(self, level)) {
+			if (!listedType(origin, stack)) found.add(stack);
+		}
 	}
 
 	/** Slot counts come from the container itself, not from an item-resource snapshot. */
@@ -781,12 +849,270 @@ public class EventHandler {
 		return "other";
 	}
 
-	private static ResourceHandler<ItemResource> findHandler(Level world, BlockPos pos) {
-		for (Direction side : sides()) {
-			ResourceHandler<ItemResource> inv = world.getCapability(Capabilities.Item.BLOCK, pos, side);
-			if (inv != null) return inv;
+	/** True when the live slots can cover every offer line. A short type pays nothing. */
+	private static boolean stockCovers(List<ItemStack> present, List<ItemStack> offer) {
+		if (present == null || offer == null || offer.isEmpty()) return false;
+		for (int i = 0; i < offer.size(); i++) {
+			ItemStack line = offer.get(i);
+			if (line == null || line.isEmpty() || line.getCount() <= 0) return false;
+			boolean earlier = false;
+			for (int j = 0; j < i; j++) {
+				if (sameType(offer.get(j), line)) {
+					earlier = true;
+					break;
+				}
+			}
+			if (earlier) continue;
+			int need = 0;
+			for (ItemStack other : offer) {
+				if (sameType(other, line)) need += other.getCount();
+			}
+			int have = 0;
+			for (ItemStack slot : present) {
+				if (sameType(slot, line)) have += slot.getCount();
+			}
+			if (have < need) return false;
 		}
-		return null;
+		return true;
+	}
+
+	private static void flushOpenMenus(Level level, BlockEntity tile, Container combined, Player actor) {
+		if (actor instanceof ServerPlayer buyer && buyer.containerMenu instanceof ChestMenu own && menuViews(own.getContainer(), tile, combined)) {
+			flushMenu(own);
+		}
+		for (ChestMenu menu : openMenus(level, tile, combined)) flushMenu(menu);
+	}
+
+	private static void flushMenu(ChestMenu menu) {
+		Container viewed = menu.getContainer();
+		if (viewed == null) return;
+		int limit = viewed.getContainerSize();
+		for (int i = 0; i < limit; i++) {
+			Slot slot;
+			try {
+				slot = menu.getSlot(i);
+			} catch (IndexOutOfBoundsException ex) {
+				break;
+			}
+			slot.getItem();
+			slot.setChanged();
+		}
+	}
+
+	private static List<ChestMenu> openMenus(Level level, BlockEntity tile, Container combined) {
+		List<ChestMenu> menus = new ArrayList<>();
+		if (!(level instanceof ServerLevel)) return menus;
+		Set<ServerPlayer> seen = new HashSet<>();
+		List<Container> parts = new ArrayList<>();
+		if (tile instanceof Container self) parts.add(self);
+		BlockEntity other = connectedChest(tile);
+		if (other instanceof Container second && !parts.contains(second)) parts.add(second);
+		if (combined != null && !parts.contains(combined)) parts.add(combined);
+		for (Container part : parts) {
+			for (ContainerUser user : part.getEntitiesWithContainerOpen()) {
+				if (user == null) continue;
+				LivingEntity living = user.getLivingEntity();
+				if (!(living instanceof ServerPlayer player) || !seen.add(player)) continue;
+				if (!(player.containerMenu instanceof ChestMenu menu)) continue;
+				if (!menuViews(menu.getContainer(), tile, combined)) continue;
+				menus.add(menu);
+			}
+		}
+		return menus;
+	}
+
+	private static boolean menuViews(Container viewed, BlockEntity tile, Container combined) {
+		if (viewed == null) return false;
+		if (viewed == combined) return true;
+		if (tile instanceof Container self && (viewed == self || viewed instanceof CompoundContainer cc && cc.contains(self))) return true;
+		BlockEntity other = connectedChest(tile);
+		return other instanceof Container second && (viewed == second || viewed instanceof CompoundContainer cc && cc.contains(second));
+	}
+
+	/** Chest slots still holding a type the block entity list does not. The buyer's menu wins a slot. */
+	private static List<ItemStack> menuExtras(Level level, BlockEntity tile, Container combined, Player actor) {
+		Map<Integer, ItemStack> byIndex = new LinkedHashMap<>();
+		List<ChestMenu> menus = openMenus(level, tile, combined);
+		ChestMenu own = null;
+		if (actor instanceof ServerPlayer buyer && buyer.containerMenu instanceof ChestMenu menu && menuViews(menu.getContainer(), tile, combined)) {
+			own = menu;
+		}
+		for (ChestMenu menu : menus) {
+			if (menu == own) continue;
+			takeMenuSlots(byIndex, menu, level, false);
+		}
+		if (own != null) takeMenuSlots(byIndex, own, level, true);
+		return new ArrayList<>(byIndex.values());
+	}
+
+	private static void takeMenuSlots(Map<Integer, ItemStack> byIndex, ChestMenu menu, Level level, boolean overwrite) {
+		Container viewed = menu.getContainer();
+		if (viewed == null) return;
+		int limit = viewed.getContainerSize();
+		for (int i = 0; i < limit; i++) {
+			Slot slot;
+			try {
+				slot = menu.getSlot(i);
+			} catch (IndexOutOfBoundsException ex) {
+				break;
+			}
+			ItemStack seen = slot.getItem();
+			if (seen == null || seen.isEmpty() || seen.getCount() <= 0) continue;
+			ItemStack offer = offerStackFromSlot(seen, level);
+			if (offer.isEmpty() || offer.getCount() <= 0) continue;
+			if (overwrite) byIndex.put(i, offer);
+			else byIndex.putIfAbsent(i, offer);
+		}
+	}
+
+	private static void invalidateShopCapabilities(BlockEntity tile) {
+		tile.invalidateCapabilities();
+		BlockEntity other = connectedChest(tile);
+		if (other != null) other.invalidateCapabilities();
+	}
+
+	/** Slots on every side whose type is absent from the block-entity list. One side per half, not a sum. */
+	private static List<ItemStack> capabilityExtras(Level level, BlockEntity tile, List<ItemStack> origin) {
+		List<ItemStack> extras = new ArrayList<>();
+		extras.addAll(richestAbsent(level, tile.getBlockPos(), origin));
+		BlockEntity other = connectedChest(tile);
+		if (other != null) extras.addAll(richestAbsent(level, other.getBlockPos(), origin));
+		return extras;
+	}
+
+	private static List<ItemStack> richestAbsent(Level level, BlockPos pos, List<ItemStack> origin) {
+		List<List<ItemStack>> sidesPresent = new ArrayList<>();
+		for (Direction side : sides()) {
+			ResourceHandler<ItemResource> handler = level.getCapability(Capabilities.Item.BLOCK, pos, side);
+			if (handler == null) continue;
+			List<ItemStack> absent = new ArrayList<>();
+			for (int i = 0; i < handler.size(); i++) {
+				int amount = handler.getAmountAsInt(i);
+				if (amount <= 0 || handler.getResource(i).isEmpty()) continue;
+				ItemStack offer = offerStackFromSlot(handler.getResource(i).toStack(amount), level);
+				if (offer.isEmpty() || offer.getCount() <= 0) continue;
+				if (listedType(origin, offer)) continue;
+				absent.add(offer);
+			}
+			if (!absent.isEmpty()) sidesPresent.add(absent);
+		}
+		List<ItemStack> chosen = new ArrayList<>();
+		List<ItemStack> types = new ArrayList<>();
+		for (List<ItemStack> side : sidesPresent) {
+			for (ItemStack stack : side) {
+				if (!listedType(types, stack)) types.add(stack);
+			}
+		}
+		for (ItemStack type : types) {
+			List<ItemStack> richest = List.of();
+			for (List<ItemStack> side : sidesPresent) {
+				List<ItemStack> ofType = new ArrayList<>();
+				for (ItemStack stack : side) {
+					if (sameType(stack, type)) ofType.add(stack);
+				}
+				if (ofType.size() > richest.size()) richest = ofType;
+			}
+			chosen.addAll(richest);
+		}
+		return chosen;
+	}
+
+	/** Keeps every stack of a type from the longer of the two lists. Does not add the lists together. */
+	private static List<ItemStack> mergeMaxByType(List<ItemStack> left, List<ItemStack> right) {
+		List<ItemStack> types = new ArrayList<>();
+		if (left != null) {
+			for (ItemStack stack : left) {
+				if (!listedType(types, stack)) types.add(stack);
+			}
+		}
+		if (right != null) {
+			for (ItemStack stack : right) {
+				if (!listedType(types, stack)) types.add(stack);
+			}
+		}
+		List<ItemStack> out = new ArrayList<>();
+		for (ItemStack type : types) {
+			List<ItemStack> fromLeft = ofType(left, type);
+			List<ItemStack> fromRight = ofType(right, type);
+			out.addAll(fromLeft.size() >= fromRight.size() ? fromLeft : fromRight);
+		}
+		return out;
+	}
+
+	private static List<ItemStack> ofType(List<ItemStack> stacks, ItemStack type) {
+		List<ItemStack> found = new ArrayList<>();
+		if (stacks == null) return found;
+		for (ItemStack stack : stacks) {
+			if (sameType(stack, type)) found.add(stack);
+		}
+		return found;
+	}
+
+	private static void watchShop(Level level, BlockPos container, BlockPos sign) {
+		if (level == null || level.isClientSide() || container == null || sign == null) return;
+		ResourceKey<Level> dimension = level.dimension();
+		BlockPos containerPos = container.immutable();
+		BlockPos signPos = sign.immutable();
+		for (WatchedShop watch : WATCHED) {
+			if (watch.dimension.equals(dimension) && watch.sign.equals(signPos)) {
+				watch.container = containerPos;
+				return;
+			}
+		}
+		WATCHED.add(new WatchedShop(dimension, containerPos, signPos));
+	}
+
+	private static void unwatch(LevelAccessor level, BlockPos pos) {
+		if (!(level instanceof Level world) || world.isClientSide() || pos == null) return;
+		ResourceKey<Level> dimension = world.dimension();
+		BlockPos key = pos.immutable();
+		WATCHED.removeIf(watch -> watch.dimension.equals(dimension) && (watch.sign.equals(key) || watch.container.equals(key)));
+	}
+
+	private static boolean chunkLoaded(ServerLevel level, BlockPos pos) {
+		return level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4) != null;
+	}
+
+	@SubscribeEvent
+	public static void onShopTick(ServerTickEvent.Post event) {
+		if (WATCHED.isEmpty()) return;
+		shopPulse++;
+		if (shopPulse % 20 != 0) return;
+		MinecraftServer server = event.getServer();
+		Iterator<WatchedShop> it = WATCHED.iterator();
+		while (it.hasNext()) {
+			WatchedShop watch = it.next();
+			ServerLevel level = server.getLevel(watch.dimension);
+			if (level == null) {
+				it.remove();
+				continue;
+			}
+			if (!chunkLoaded(level, watch.sign)) continue;
+			BlockEntity signBe = level.getBlockEntity(watch.sign);
+			if (!(signBe instanceof SignBlockEntity sign)
+					|| !(sign.getBlockState().getBlock() instanceof WallSignBlock)
+					|| !sign.getPersistentData().contains(ACTIVATED)) {
+				it.remove();
+				continue;
+			}
+			BlockPos back = watch.sign.relative(sign.getBlockState().getValue(WallSignBlock.FACING).getOpposite());
+			if (!chunkLoaded(level, back)) continue;
+			BlockEntity storage = level.getBlockEntity(back);
+			if (storage == null) {
+				it.remove();
+				continue;
+			}
+			watch.container = back.immutable();
+			Container container = liveContainer(level, storage.getBlockPos(), storage);
+			List<ItemStack> present = readShopSlots(level, storage, container, null);
+			if (present == null) continue;
+			List<ItemStack> next = refreshOffer(sign, present, level);
+			if (next == null) continue;
+			ListTag encoded = encodeOffer(level, next);
+			if (encoded.size() != next.size()) continue;
+			if (encoded.equals(sign.getPersistentData().getListOrEmpty(ITEMS))) continue;
+			rememberOffer(sign, level, next);
+		}
 	}
 
 	private static List<Direction> sides() {
@@ -808,11 +1134,10 @@ public class EventHandler {
 		return items;
 	}
 
-	/** Same item id and the same component patch. A different id is never the same type. */
+	/** Same item id and the same components. A different id is never the same type. */
 	private static boolean sameType(ItemStack a, ItemStack b) {
 		if (a == null || b == null || a.isEmpty() || b.isEmpty()) return false;
-		if (a.getItem() != b.getItem()) return false;
-		return a.getComponentsPatch().equals(b.getComponentsPatch());
+		return ItemStack.isSameItemSameComponents(a, b);
 	}
 
 	private static Tag saveStack(Level level, ItemStack stack) {
